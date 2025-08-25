@@ -1,3 +1,0 @@
-int Prem = 0
-if Prem == 0:
-  print("Hello")
