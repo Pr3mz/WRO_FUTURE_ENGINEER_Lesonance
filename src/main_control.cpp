@@ -3,69 +3,82 @@
 #include <WiFiUdp.h>
 #include <IROVER.h>
 
-// ---- Wi-Fi SoftAP (ESP32 acts as hotspot) ----
+// --- Wi-Fi ---
 const char* AP_SSID = "ESP32-CAR";
-const char* AP_PASS = "drive123";        // change if you want
+const char* AP_PASS = "drive123";
 
-// ---- UDP ----
+// --- UDP ---
 WiFiUDP udp;
 const uint16_t UDP_PORT = 4210;
 char rxBuf[64];
 
-// ---- Motor Speed ----
-int MOTOR_SPEED = 100;
+// --- Motors ---
+int MOTOR_SPEED = 120;
+void stop(){
+  motor(1,0);
+  motor(2,0);
+}
+// --- IR Sensors for lap counting ---
+const int IR_LEFT = 32;
+const int IR_RIGHT = 34;
+int lap_count = 0;
+bool lap_triggered = false;  // prevent multiple counts per line
+
 void setup() {
-  Serial.begin(115200);
-  ao();
+    init(0x48);       // IROVER init
+    stop();
+    Serial.begin(115200);
 
-  // Start SoftAP
-  WiFi.mode(WIFI_AP);
-  bool ok = WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.println(ok ? "AP up" : "AP failed");
-  Serial.print("AP IP: "); Serial.println(WiFi.softAPIP()); // usually 192.168.4.1
+    pinMode(IR_LEFT, INPUT);
+    pinMode(IR_RIGHT, INPUT);
 
-  // Start UDP
-  udp.begin(UDP_PORT);
-  Serial.print("Listening UDP on port "); Serial.println(UDP_PORT);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(AP_SSID, AP_PASS);
+    Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
+
+    udp.begin(UDP_PORT);
+    Serial.println("UDP ready");
 }
 
 void loop() {
-  int pktSize = udp.parsePacket();
-  if (pktSize > 0) {
-    IPAddress remote = udp.remoteIP();
-    unsigned int remotePort = udp.remotePort();
+    // --- Receive commands from Python ---
+    int pktSize = udp.parsePacket();
+    if(pktSize > 0){
+        int n = udp.read(rxBuf, sizeof(rxBuf)-1);
+        rxBuf[n] = 0;
+        String cmd = String(rxBuf);
+        cmd.trim();
+        cmd.toUpperCase();
 
-    int n = udp.read(rxBuf, sizeof(rxBuf) - 1);
-    rxBuf[n] = 0;
-    String cmd = String(rxBuf);
-    cmd.trim();
-    cmd.toUpperCase();
+        Serial.print("CMD: "); Serial.println(cmd);
 
-    Serial.print("From ");
-    Serial.print(remote);
-    Serial.print(':');
-    Serial.print(remotePort);
-    Serial.print("  CMD: ");
-    Serial.println(cmd);
+        udp.beginPacket(udp.remoteIP(), udp.remotePort());
+        udp.write((const uint8_t*)"ACK", 3);
+        udp.endPacket();
 
-    // ACK back so Python can detect comms health
-    udp.beginPacket(remote, remotePort);
-    udp.write((const uint8_t*)"ACK", 3);
-    udp.endPacket();
-
-    // speed set: "SPD120"
-    if (cmd.startsWith("SPD")) {
-      int newspd = cmd.substring(3).toInt();
-      MOTOR_SPEED = constrain(newspd, 0, 255);
-      Serial.print("Speed set to "); Serial.println(MOTOR_SPEED);
-      return;
+        if(cmd == "FWD") fd(MOTOR_SPEED);
+        else if(cmd == "BACK") bk(MOTOR_SPEED);
+        else if(cmd == "LEFT") tl(MOTOR_SPEED);
+        else if(cmd == "RIGHT") tr(MOTOR_SPEED);
+        else if(cmd == "STOP") stop();
     }
 
-    if (cmd == "FWD")        fd(MOTOR_SPEED);
-    else if (cmd == "BACK")  bk(MOTOR_SPEED);
-    else if (cmd == "LEFT")  tl(MOTOR_SPEED);
-    else if (cmd == "RIGHT") tr(MOTOR_SPEED);
-    else if (cmd == "STOP")  ao();
-    else                     { Serial.println("Unknown cmd => STOP"); ao(); }
-  }
+    // --- Lap counting with IR sensors ---
+    int leftVal = digitalRead(IR_LEFT);
+    int rightVal = digitalRead(IR_RIGHT);
+
+    // Both sensors detect the line (active LOW if using reflective IR)
+    if(leftVal == LOW && rightVal == LOW && !lap_triggered){
+        lap_count++;
+        lap_triggered = true;
+        Serial.print("Lap completed! Total laps: ");
+        Serial.println(lap_count);
+    }
+
+    // Reset trigger when sensors are off the line
+    if(leftVal == HIGH || rightVal == HIGH){
+        lap_triggered = false;
+    }
+
+    delay(10);
 }

@@ -1,16 +1,235 @@
+# import cv2, numpy as np, socket, time, math
+
+# ESP32_IP = "192.168.4.1"
+# ESP32_PORT = 4210
+# sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# def send_raw(cmd: str):
+#     sock.sendto(cmd.encode(), (ESP32_IP, ESP32_PORT))
+
+# # --- camera auto-find ---
+# def find_camera(max_index=6):
+#     for i in range(max_index):
+#         cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # use CAP_DSHOW on Windows for stability
+#         if cap.isOpened():
+#             print(f"Camera found at index {i}")
+#             return cap
+#         cap.release()
+#     print("Error: No camera found")
+#     exit()
+
+# cap = find_camera()
+
+# # --- HSV ranges (tune with calibration tool later) ---
+# ranges = {
+#     "RED1":  ((0, 100, 60),   (10, 255, 255)),
+#     "RED2":  ((170, 100, 60), (180, 255, 255)),
+#     "GREEN": ((35, 60, 40),   (85, 255, 255)),
+#     "BLUE":  ((95, 80, 50),   (130, 255, 255)),
+#     "YELL":  ((18, 100, 100), (35, 255, 255)),
+#     "PURP":  ((125, 50, 50),  (155, 255, 255))
+# }
+
+# KERNEL = np.ones((5,5), np.uint8)
+
+# def clean_mask(m):
+#     m = cv2.morphologyEx(m, cv2.MORPH_OPEN, KERNEL, iterations=1)
+#     m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, KERNEL, iterations=1)
+#     return m
+
+# def detect_color_and_shape(hsv, frame):
+#     masks = {}
+#     # red two-range
+#     r1 = cv2.inRange(hsv, *ranges["RED1"])
+#     r2 = cv2.inRange(hsv, *ranges["RED2"])
+#     masks["RED"] = clean_mask(cv2.bitwise_or(r1, r2))
+#     masks["GREEN"] = clean_mask(cv2.inRange(hsv, *ranges["GREEN"]))
+#     masks["BLUE"] = clean_mask(cv2.inRange(hsv, *ranges["BLUE"]))
+#     masks["YELL"] = clean_mask(cv2.inRange(hsv, *ranges["YELL"]))
+#     masks["PURP"] = clean_mask(cv2.inRange(hsv, *ranges["PURP"]))
+
+#     best = {"name": None, "area": 0, "centroid": None, "circ": 0, "bbox": None}
+#     for name, m in masks.items():
+#         cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#         if not cnts: continue
+#         c = max(cnts, key=cv2.contourArea)
+#         area = cv2.contourArea(c)
+#         if area < 200: continue
+#         peri = cv2.arcLength(c, True)
+#         circ = 4 * math.pi * area / (peri*peri) if peri > 0 else 0
+#         M = cv2.moments(c)
+#         cx = int(M["m10"]/M["m00"]) if M["m00"] else None
+#         cy = int(M["m01"]/M["m00"]) if M["m00"] else None
+#         x,y,w,h = cv2.boundingRect(c)
+#         if area > best["area"]:
+#             best.update({"name": name, "area": area, "centroid": (cx,cy), "circ": circ, "bbox": (x,y,w,h)})
+#     return best, masks
+
+# # --- Command scheduler (non-blocking) ---
+# class Commander:
+#     def __init__(self):
+#         self.queue = []  # list of (cmd, dur_s)
+#         self.running = False
+#         self.cur_end = 0
+
+#     def schedule(self, cmd, dur):
+#         self.queue.append((cmd, dur))
+#         if not self.running:
+#             self._start_next()
+
+#     def _start_next(self):
+#         if not self.queue:
+#             self.running = False
+#             send_raw("STOP")
+#             return
+#         cmd, dur = self.queue.pop(0)
+#         send_raw(cmd)
+#         self.running = True
+#         self.cur_end = time.time() + max(dur, 0.02)
+
+#     def update(self):
+#         if self.running and time.time() > self.cur_end:
+#             self._start_next()
+
+# comm = Commander()
+
+# # --- path timing params: tune on your robot ---
+# FORWARD_TIME = 2.2   # seconds for one side (experiment)
+# TURN_TIME    = 0.60  # seconds for ~90deg turn (tune)
+# FORWARD_SHORT = 0.6
+# TURN_SHORT = 0.45
+
+# # state
+# side = 0
+# step = "fwd"   # 'fwd' or 'turn'
+# lap = 0
+# state = "path"  # 'path' | 'seek_purple' | 'done'
+
+# print("Starting main loop. Press ESC in window to quit.")
+
+# while True:
+#     ok, frame = cap.read()
+#     if not ok:
+#         print("Camera frame failed")
+#         break
+
+#     frame = cv2.resize(frame, (640, 480))
+#     blurred = cv2.GaussianBlur(frame, (5,5), 0)
+#     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+#     gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+
+#     best, masks = detect_color_and_shape(hsv, frame)
+#     cxcy = best["centroid"]
+#     color = best["name"]
+#     area = best["area"]
+#     circ = best["circ"]
+#     bbox = best["bbox"]
+
+#     # cylinder detection: reasonably large and roughly circular and near center
+#     h, w = gray.shape
+#     center_x_range = (int(w*0.35), int(w*0.65))
+#     cylinder_ahead = False
+#     if color in ("RED", "GREEN", "BLUE", "YELL") and area > 2000 and circ > 0.45:
+#         if cxcy and center_x_range[0] <= cxcy[0] <= center_x_range[1]:
+#             cylinder_ahead = True
+
+#     # main command scheduling logic
+#     comm.update()
+
+#     if state == "path" and not comm.running:
+#         # if cylinder detected, interrupt for avoidance
+#         if cylinder_ahead:
+#             # decide side based on color: RED => go left around, GREEN => right
+#             print("Cylinder ahead:", color, "area", area, "circ", circ)
+#             if color == "RED":
+#                 seq = [("STOP",0.05),
+#                        ("LEFT", TURN_SHORT),
+#                        ("FWD", FORWARD_SHORT),
+#                        ("RIGHT", TURN_SHORT*1.1),
+#                        ("FWD", FORWARD_SHORT)]
+#             elif color == "GREEN":
+#                 seq = [("STOP",0.05),
+#                        ("RIGHT", TURN_SHORT),
+#                        ("FWD", FORWARD_SHORT),
+#                        ("LEFT", TURN_SHORT*1.1),
+#                        ("FWD", FORWARD_SHORT)]
+#             else:
+#                 seq = [("STOP",0.05), ("FWD", FORWARD_SHORT)]
+#             for s in seq:
+#                 comm.schedule(s[0], s[1])
+#         else:
+#             # follow square open-loop
+#             if step == "fwd":
+#                 comm.schedule("FWD", FORWARD_TIME)
+#                 comm.schedule("STOP", 0.04)
+#                 step = "turn"
+#             elif step == "turn":
+#                 comm.schedule("RIGHT", TURN_TIME)
+#                 comm.schedule("STOP", 0.04)
+#                 side = (side + 1) % 4
+#                 if side == 0:
+#                     lap += 1
+#                     print("Completed lap", lap)
+#                     if lap >= 3:
+#                         state = "seek_purple"
+#                 step = "fwd"
+
+#     # seek purple wall after 3 laps
+#     if state == "seek_purple":
+#         # if purple detected and big enough, stop and finish
+#         if color == "PURP" and area > 3000:
+#             x,y,ww,hh = bbox
+#             if ww >= frame.shape[1]*0.55:  # purple occupies >55% width -> close
+#                 comm.schedule("STOP", 0.05)
+#                 state = "done"
+#                 print("Purple wall reached — stopping parallel.")
+#         else:
+#             # slowly advance in small steps until we detect purple
+#             if not comm.running:
+#                 comm.schedule("FWD", 0.6)
+#                 comm.schedule("STOP", 0.05)
+
+#     # done -> stop permanently
+#     if state == "done":
+#         send_raw("STOP")
+#         status = "FINISHED"
+#     else:
+#         if cylinder_ahead:
+#             status = f"AVOID {color}"
+#         elif color:
+#             status = f"{color} area={int(area)} circ={circ:.2f} lap={lap}"
+#         else:
+#             status = f"No big color - lap={lap}"
+
+#     # overlay for debugging
+#     if cxcy:
+#         cv2.circle(frame, cxcy, 6, (0,255,0), -1)
+#     if bbox:
+#         x,y,ww,hh = bbox
+#         cv2.rectangle(frame, (x,y), (x+ww, y+hh), (255,0,255), 2)
+#     cv2.putText(frame, status, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+
+#     cv2.imshow("AI Vision", frame)
+#     key = cv2.waitKey(1) & 0xFF
+#     if key == 27:  # ESC
+#         break
+
+# cap.release()
+# cv2.destroyAllWindows()
+
 import cv2, numpy as np, socket, time, math
 
 ESP32_IP = "192.168.4.1"
 ESP32_PORT = 4210
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-def send_raw(cmd: str):
+def send_cmd(cmd: str):
     sock.sendto(cmd.encode(), (ESP32_IP, ESP32_PORT))
 
-# --- camera auto-find ---
+# --- Camera auto-find ---
 def find_camera(max_index=6):
     for i in range(max_index):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # use CAP_DSHOW on Windows for stability
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
         if cap.isOpened():
             print(f"Camera found at index {i}")
             return cap
@@ -20,198 +239,133 @@ def find_camera(max_index=6):
 
 cap = find_camera()
 
-# --- HSV ranges (tune with calibration tool later) ---
+# --- HSV ranges ---
 ranges = {
-    "RED1":  ((0, 100, 60),   (10, 255, 255)),
-    "RED2":  ((170, 100, 60), (180, 255, 255)),
-    "GREEN": ((35, 60, 40),   (85, 255, 255)),
-    "BLUE":  ((95, 80, 50),   (130, 255, 255)),
-    "YELL":  ((18, 100, 100), (35, 255, 255)),
-    "PURP":  ((125, 50, 50),  (155, 255, 255))
+    "RED1": ((0, 100, 60), (10, 255, 255)),
+    "RED2": ((170, 100, 60), (180, 255, 255)),
+    "GREEN": ((35, 60, 40), (85, 255, 255)),
+    "BLUE": ((95, 80, 50), (130, 255, 255)),
+    "YELLOW": ((18, 100, 100), (35, 255, 255)),
+    "PURPLE": ((125, 50, 50), (155, 255, 255))
 }
 
 KERNEL = np.ones((5,5), np.uint8)
 
-def clean_mask(m):
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, KERNEL, iterations=1)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, KERNEL, iterations=1)
-    return m
+def clean_mask(mask):
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, KERNEL, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL, iterations=1)
+    return mask
 
-def detect_color_and_shape(hsv, frame):
+def detect_color_and_shape(hsv):
     masks = {}
-    # red two-range
+    # Red has two ranges
     r1 = cv2.inRange(hsv, *ranges["RED1"])
     r2 = cv2.inRange(hsv, *ranges["RED2"])
     masks["RED"] = clean_mask(cv2.bitwise_or(r1, r2))
     masks["GREEN"] = clean_mask(cv2.inRange(hsv, *ranges["GREEN"]))
     masks["BLUE"] = clean_mask(cv2.inRange(hsv, *ranges["BLUE"]))
-    masks["YELL"] = clean_mask(cv2.inRange(hsv, *ranges["YELL"]))
-    masks["PURP"] = clean_mask(cv2.inRange(hsv, *ranges["PURP"]))
+    masks["YELLOW"] = clean_mask(cv2.inRange(hsv, *ranges["YELLOW"]))
+    masks["PURPLE"] = clean_mask(cv2.inRange(hsv, *ranges["PURPLE"]))
 
-    best = {"name": None, "area": 0, "centroid": None, "circ": 0, "bbox": None}
-    for name, m in masks.items():
-        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts: continue
-        c = max(cnts, key=cv2.contourArea)
+    best = {"name": None, "area": 0, "centroid": None, "circ": 0, "bbox": None, "approx": None}
+
+    for color, mask in masks.items():
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        # pick largest contour
+        c = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(c)
-        if area < 200: continue
+        if area < 200:
+            continue
         peri = cv2.arcLength(c, True)
-        circ = 4 * math.pi * area / (peri*peri) if peri > 0 else 0
+        circ = 4 * math.pi * area / (peri * peri) if peri > 0 else 0
         M = cv2.moments(c)
-        cx = int(M["m10"]/M["m00"]) if M["m00"] else None
-        cy = int(M["m01"]/M["m00"]) if M["m00"] else None
-        x,y,w,h = cv2.boundingRect(c)
+        cx = int(M["m10"] / M["m00"]) if M["m00"] else None
+        cy = int(M["m01"] / M["m00"]) if M["m00"] else None
+        x, y, w, h = cv2.boundingRect(c)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)  # polygon approximation
+
         if area > best["area"]:
-            best.update({"name": name, "area": area, "centroid": (cx,cy), "circ": circ, "bbox": (x,y,w,h)})
+            best.update({
+                "name": color,
+                "area": area,
+                "centroid": (cx, cy),
+                "circ": circ,
+                "bbox": (x, y, w, h),
+                "approx": approx
+            })
     return best, masks
 
-# --- Command scheduler (non-blocking) ---
-class Commander:
-    def __init__(self):
-        self.queue = []  # list of (cmd, dur_s)
-        self.running = False
-        self.cur_end = 0
+# --- lap tracking ---
+lap_count = 0
+lap_colors_seen = set()
+state = "path"
 
-    def schedule(self, cmd, dur):
-        self.queue.append((cmd, dur))
-        if not self.running:
-            self._start_next()
-
-    def _start_next(self):
-        if not self.queue:
-            self.running = False
-            send_raw("STOP")
-            return
-        cmd, dur = self.queue.pop(0)
-        send_raw(cmd)
-        self.running = True
-        self.cur_end = time.time() + max(dur, 0.02)
-
-    def update(self):
-        if self.running and time.time() > self.cur_end:
-            self._start_next()
-
-comm = Commander()
-
-# --- path timing params: tune on your robot ---
-FORWARD_TIME = 2.2   # seconds for one side (experiment)
-TURN_TIME    = 0.60  # seconds for ~90deg turn (tune)
-FORWARD_SHORT = 0.6
-TURN_SHORT = 0.45
-
-# state
-side = 0
-step = "fwd"   # 'fwd' or 'turn'
-lap = 0
-state = "path"  # 'path' | 'seek_purple' | 'done'
-
-print("Starting main loop. Press ESC in window to quit.")
-
+# --- Main loop ---
 while True:
-    ok, frame = cap.read()
-    if not ok:
-        print("Camera frame failed")
+    ret, frame = cap.read()
+    if not ret:
         break
-
     frame = cv2.resize(frame, (640, 480))
     blurred = cv2.GaussianBlur(frame, (5,5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
 
-    best, masks = detect_color_and_shape(hsv, frame)
+    best, masks = detect_color_and_shape(hsv)
     cxcy = best["centroid"]
     color = best["name"]
     area = best["area"]
     circ = best["circ"]
     bbox = best["bbox"]
+    approx = best["approx"]
 
-    # cylinder detection: reasonably large and roughly circular and near center
-    h, w = gray.shape
-    center_x_range = (int(w*0.35), int(w*0.65))
+    # --- Lap detection ---
+    if color in ("RED","YELLOW","BLUE"):
+        lap_colors_seen.add(color)
+    if len(lap_colors_seen) == 3:
+        lap_count += 1
+        lap_colors_seen.clear()
+        print(f"Lap {lap_count} completed")
+
+    # --- Traffic light cylinder detection ---
     cylinder_ahead = False
-    if color in ("RED", "GREEN", "BLUE", "YELL") and area > 2000 and circ > 0.45:
-        if cxcy and center_x_range[0] <= cxcy[0] <= center_x_range[1]:
-            cylinder_ahead = True
-
-    # main command scheduling logic
-    comm.update()
-
-    if state == "path" and not comm.running:
-        # if cylinder detected, interrupt for avoidance
-        if cylinder_ahead:
-            # decide side based on color: RED => go left around, GREEN => right
-            print("Cylinder ahead:", color, "area", area, "circ", circ)
+    if color in ("RED","GREEN") and area > 2000 and circ > 0.45:
+        cylinder_ahead = True
+        if cxcy and 0.35*frame.shape[1] < cxcy[0] < 0.65*frame.shape[1]:
             if color == "RED":
-                seq = [("STOP",0.05),
-                       ("LEFT", TURN_SHORT),
-                       ("FWD", FORWARD_SHORT),
-                       ("RIGHT", TURN_SHORT*1.1),
-                       ("FWD", FORWARD_SHORT)]
+                send_cmd("LEFT")
             elif color == "GREEN":
-                seq = [("STOP",0.05),
-                       ("RIGHT", TURN_SHORT),
-                       ("FWD", FORWARD_SHORT),
-                       ("LEFT", TURN_SHORT*1.1),
-                       ("FWD", FORWARD_SHORT)]
-            else:
-                seq = [("STOP",0.05), ("FWD", FORWARD_SHORT)]
-            for s in seq:
-                comm.schedule(s[0], s[1])
-        else:
-            # follow square open-loop
-            if step == "fwd":
-                comm.schedule("FWD", FORWARD_TIME)
-                comm.schedule("STOP", 0.04)
-                step = "turn"
-            elif step == "turn":
-                comm.schedule("RIGHT", TURN_TIME)
-                comm.schedule("STOP", 0.04)
-                side = (side + 1) % 4
-                if side == 0:
-                    lap += 1
-                    print("Completed lap", lap)
-                    if lap >= 3:
-                        state = "seek_purple"
-                step = "fwd"
+                send_cmd("RIGHT")
+            continue
 
-    # seek purple wall after 3 laps
-    if state == "seek_purple":
-        # if purple detected and big enough, stop and finish
-        if color == "PURP" and area > 3000:
-            x,y,ww,hh = bbox
-            if ww >= frame.shape[1]*0.55:  # purple occupies >55% width -> close
-                comm.schedule("STOP", 0.05)
-                state = "done"
-                print("Purple wall reached — stopping parallel.")
-        else:
-            # slowly advance in small steps until we detect purple
-            if not comm.running:
-                comm.schedule("FWD", 0.6)
-                comm.schedule("STOP", 0.05)
+    # --- Path movement ---
+    if state == "path":
+        send_cmd("FWD")
 
-    # done -> stop permanently
-    if state == "done":
-        send_raw("STOP")
-        status = "FINISHED"
-    else:
-        if cylinder_ahead:
-            status = f"AVOID {color}"
-        elif color:
-            status = f"{color} area={int(area)} circ={circ:.2f} lap={lap}"
-        else:
-            status = f"No big color - lap={lap}"
+    # --- Purple wall parking after 3 laps ---
+    if lap_count >= 3 and color == "PURPLE" and area > 3000:
+        x, y, w, h = bbox
+        if w >= frame.shape[1]*0.55:
+            send_cmd("FWD")
+            time.sleep(2)
+            send_cmd("STOP")
+            print("Reached purple wall, parked!")
+            break
 
-    # overlay for debugging
+    # --- Debug overlay ---
     if cxcy:
         cv2.circle(frame, cxcy, 6, (0,255,0), -1)
     if bbox:
-        x,y,ww,hh = bbox
-        cv2.rectangle(frame, (x,y), (x+ww, y+hh), (255,0,255), 2)
+        x, y, w, h = bbox
+        cv2.rectangle(frame, (x,y), (x+w, y+h), (255,0,255), 2)
+    if approx is not None:
+        cv2.drawContours(frame, [approx], -1, (0,255,255), 2)
+
+    status = f"Color:{color} Lap:{lap_count} Area:{int(area)} Circ:{circ:.2f}"
     cv2.putText(frame, status, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
     cv2.imshow("AI Vision", frame)
-    key = cv2.waitKey(1) & 0xFF
-    if key == 27:  # ESC
+    if cv2.waitKey(1) & 0xFF == 27:
         break
 
 cap.release()
