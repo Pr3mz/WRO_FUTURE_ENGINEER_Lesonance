@@ -18,7 +18,7 @@ def find_camera(max_index=6):
     print("Error: No camera found")
     exit()
 
-cap = find_camera()
+cap = cv2.VideoCapture(1)#find_camera()
 
 # --- HSV ranges ---
 ranges = {

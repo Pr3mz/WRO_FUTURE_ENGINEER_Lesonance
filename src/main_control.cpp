@@ -13,14 +13,14 @@ const uint16_t UDP_PORT = 4210;
 char rxBuf[64];
 
 // --- Motors ---
-int MOTOR_SPEED = 120;
+int MOTOR_SPEED = 26;
 void stop(){
   motor(1,0);
   motor(2,0);
 }
-// --- IR Sensors for lap counting ---
-const int IR_LEFT = 32;
-const int IR_RIGHT = 34;
+// // --- IR Sensors for lap counting ---
+// const int IR_LEFT = 32;
+// const int IR_RIGHT = 34;
 int lap_count = 0;
 bool lap_triggered = false;  // prevent multiple counts per line
 
@@ -29,8 +29,8 @@ void setup() {
     stop();
     Serial.begin(115200);
 
-    pinMode(IR_LEFT, INPUT);
-    pinMode(IR_RIGHT, INPUT);
+    // pinMode(IR_LEFT, INPUT);
+    // pinMode(IR_RIGHT, INPUT);
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASS);
@@ -63,22 +63,22 @@ void loop() {
         else if(cmd == "STOP") stop();
     }
 
-    // --- Lap counting with IR sensors ---
-    int leftVal = digitalRead(IR_LEFT);
-    int rightVal = digitalRead(IR_RIGHT);
+    // // --- Lap counting with IR sensors ---
+    // int leftVal = digitalRead(IR_LEFT);
+    // int rightVal = digitalRead(IR_RIGHT);
 
     // Both sensors detect the line (active LOW if using reflective IR)
-    if(leftVal == LOW && rightVal == LOW && !lap_triggered){
-        lap_count++;
-        lap_triggered = true;
-        Serial.print("Lap completed! Total laps: ");
-        Serial.println(lap_count);
-    }
+    // if(leftVal == LOW && rightVal == LOW && !lap_triggered){
+    //     lap_count++;
+    //     lap_triggered = true;
+    //     Serial.print("Lap completed! Total laps: ");
+    //     Serial.println(lap_count);
+    // }
 
     // Reset trigger when sensors are off the line
-    if(leftVal == HIGH || rightVal == HIGH){
-        lap_triggered = false;
-    }
+    // if(leftVal == HIGH || rightVal == HIGH){
+    //     lap_triggered = false;
+    // }
 
     delay(10);
 }
